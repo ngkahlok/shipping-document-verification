@@ -174,12 +174,35 @@ if use_gt and gt is None:
 # --------------------------------------------------------------------------
 # Dashboard
 # --------------------------------------------------------------------------
+def classification_confidence(rows):
+    """Per-email classification confidence: the winning category's score,
+    the margin over the runner-up (a continuous confidence proxy), and the
+    high/low label classify_trace already assigns from that margin."""
+    out = []
+    for r in rows:
+        ct = r["classify_trace"]
+        scores = ct.get("scores") or {}
+        ranked = sorted(scores.values(), reverse=True)
+        top = ranked[0] if ranked else 0
+        runner = ranked[1] if len(ranked) > 1 else 0
+        out.append({
+            "email_id": r["email_id"], "category": r["category"],
+            "confidence": ct.get("confidence", "high"),
+            "top_score": top, "runner_up_score": runner, "margin": top - runner,
+        })
+    return out
+
+
 def dashboard():
     st.title("Pipeline results dashboard")
 
     score = None
     if gt:
         score = scoring.score_all(gt, build_submission_dict(eff_rows))
+
+    conf_stats = classification_confidence(rows)
+    low_conf = [c for c in conf_stats if c["confidence"] == "low"]
+    avg_margin = sum(c["margin"] for c in conf_stats) / len(conf_stats) if conf_stats else 0.0
 
     if score:
         c1, c2, c3, c4, c5, c6 = st.columns(6)
@@ -195,6 +218,33 @@ def dashboard():
                    else "Report reflects raw pipeline output only (human corrections off).")
         st.divider()
 
+    st.subheader("Classification confidence")
+    st.caption("Confidence = margin between the winning category's signal score and the runner-up's "
+               "(see pipeline/classify.py). A low margin means the classifier isn't sure -- those cases "
+               "also show up in the Review Queue.")
+    cc1, cc2, cc3 = st.columns(3)
+    cc1.metric("Low-confidence emails", len(low_conf), help="confidence == 'low' (margin < 2)")
+    cc2.metric("Avg. confidence margin", f"{avg_margin:.2f}")
+    cc3.metric("High-confidence emails", len(conf_stats) - len(low_conf))
+
+    conf_col1, conf_col2 = st.columns(2)
+    with conf_col1:
+        df = pd.DataFrame(conf_stats)
+        by_cat = df.groupby(["category", "confidence"]).size().reset_index(name="count")
+        fig = px.bar(by_cat, x="category", y="count", color="confidence",
+                     color_discrete_map={"high": "#2e7d32", "low": "#f9a825"}, barmode="stack")
+        fig.update_layout(height=300, title="Confidence by category")
+        st.plotly_chart(fig, width="stretch")
+    with conf_col2:
+        fig = px.histogram(pd.DataFrame(conf_stats), x="margin", nbins=20)
+        fig.update_layout(height=300, title="Margin distribution")
+        st.plotly_chart(fig, width="stretch")
+
+    if low_conf:
+        with st.expander(f"Low-confidence emails ({len(low_conf)})"):
+            st.dataframe(pd.DataFrame(low_conf), width="stretch", height=min(300, 40 + 35 * len(low_conf)))
+
+    st.divider()
     col1, col2 = st.columns(2)
 
     with col1:
