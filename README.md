@@ -132,15 +132,54 @@ Two views:
 Both the inbox path and ground-truth path are editable in the sidebar;
 ground-truth scoring can be toggled off to browse label-free.
 
-## Setup
+## Setup (new users start here)
 
-Everything runs inside a project-local virtualenv so nothing pollutes the
-system Python:
+Requires Python 3.9+. Everything runs inside a project-local virtualenv so
+nothing pollutes your system Python.
 
-```bash
-python3 -m venv .venv
-./.venv/bin/pip install pdfplumber python-docx openpyxl streamlit plotly pandas
-```
+1. **Clone/open the project, then create the virtualenv:**
 
-(`score_cli.py` and the Docker server only need the standard library /
-`fastapi`+`uvicorn` respectively — see `sdoc-hackathon-docker/server/requirements.txt`.)
+   ```bash
+   cd shipping-document-verification
+   python3 -m venv .venv
+   ```
+
+2. **Install dependencies** from `requirements.txt`:
+
+   ```bash
+   ./.venv/bin/pip install -r requirements.txt
+   ```
+
+3. **Verify it works** by running the pipeline over the sample inbox:
+
+   ```bash
+   ./.venv/bin/python3 pipeline/run.py sdoc-hackathon-bundle submission.json
+   ```
+
+   You should see `wrote 520 predictions to submission.json`.
+
+4. **(Optional) Score it** against the organizer's ground truth — no Docker
+   needed, just the standard library:
+
+   ```bash
+   cd sdoc-hackathon-docker/server
+   python3 score_cli.py ../../submission.json
+   cd ../..
+   ```
+
+5. **Launch the Streamlit app:**
+
+   ```bash
+   ./.venv/bin/streamlit run app.py
+   ```
+
+   Opens at `http://localhost:8501` — see [Streamlit app](#streamlit-app)
+   above for what's on each page.
+
+Everything after step 2 assumes the venv's Python (`./.venv/bin/python3` /
+`./.venv/bin/streamlit`), not whatever `python3` resolves to on your `PATH`.
+
+`score_cli.py` and the Docker server (step 4's alternative, see
+[Scoring](#scoring)) only need the standard library / `fastapi`+`uvicorn`
+respectively — their own `requirements.txt` lives in
+`sdoc-hackathon-docker/server/`.
