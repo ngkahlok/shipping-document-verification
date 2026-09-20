@@ -10,8 +10,12 @@ import json
 import sys
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE))
+
+load_dotenv(HERE.parent / ".env")  # gitignored; fills GEMINI_API_KEY etc. if present, never overrides a real env var
 
 from classify import classify
 from compare import compare_email
@@ -28,8 +32,15 @@ def _load_inbox(source):
 
 def build_submission(source):
     inbox = _load_inbox(source)
+    emails = list(inbox)
+
+    import os
+    if os.environ.get("SDOC_CLASSIFIER", "rules").strip().lower() == "gemini" and os.environ.get("GEMINI_API_KEY"):
+        import gemini_classify
+        gemini_classify.warm_cache(emails)  # concurrent pre-warm so the loop below mostly hits cache
+
     submission = {}
-    for email in inbox:
+    for email in emails:
         eid = email["email_id"]
         category, decided_by = classify(email)
         if category == "BL_COMPARISON":

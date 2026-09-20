@@ -1,3 +1,7 @@
 .venv
 __pycache__
 /sdoc-hackathon-docker/data_v2/ground_truth.json
+.env
+.streamlit/secrets.toml
+/pipeline/.cache/
+/pipeline/tools/

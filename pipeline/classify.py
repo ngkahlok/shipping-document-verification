@@ -13,7 +13,14 @@ Confidence is exposed (not just the winning label) so a genuinely
 ambiguous email -- one where no signal fires, or two categories score
 within a hair of each other -- can be routed to a human instead of forcing
 a guess. See classify_trace()'s `confidence` field.
+
+classify_trace() is a dispatcher: by default it returns this rule-based
+result directly (_classify_trace_rules), but set SDOC_CLASSIFIER=gemini to
+route through pipeline/gemini_classify.py instead, which uses this rule
+scorer's output as a hint in its prompt and as the fallback if the API
+call fails for any reason.
 """
+import os
 import re
 
 # (pattern, weight). Weight reflects how uniquely that phrase identifies the
@@ -85,10 +92,21 @@ def _score(haystack):
     return scores, matches
 
 
-def classify_trace(email):
-    """Full detail behind a classification decision: per-category scores,
-    which signals fired, and a confidence label so ambiguous cases can be
-    routed to a human instead of forcing a guess."""
+def _confidence_label(scores, margin_threshold):
+    """'high' iff the top score beats the runner-up by at least the given
+    margin -- shared by the rule scorer and the Gemini backend (which uses
+    its own threshold, since its 0-100 scale isn't comparable to these
+    small integer weights)."""
+    ranked = sorted(scores.values(), reverse=True)
+    top = ranked[0] if ranked else 0
+    runner = ranked[1] if len(ranked) > 1 else 0
+    return "high" if (top - runner) >= margin_threshold else "low"
+
+
+def _classify_trace_rules(email):
+    """Full detail behind a rule-based classification decision: per-category
+    scores, which signals fired, and a confidence label so ambiguous cases
+    can be routed to a human instead of forcing a guess."""
     subject = email.get("subject", "") or ""
     body = email.get("body", "") or ""
     haystack = f"{subject}\n{body}"
@@ -96,7 +114,6 @@ def classify_trace(email):
     scores, matches = _score(haystack)
     ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
     top_cat, top_score = ranked[0]
-    runner_score = ranked[1][1] if len(ranked) > 1 else 0
 
     if top_score == 0:
         attachments = email.get("attachments") or []
@@ -108,7 +125,7 @@ def classify_trace(email):
                 "scores": scores, "matched_signals": [],
                 "reason": "no keyword signal fired for any category"}
 
-    confidence = "high" if (top_score - runner_score) >= CONFIDENT_MARGIN else "low"
+    confidence = _confidence_label(scores, CONFIDENT_MARGIN)
     top_matches = sorted(matches[top_cat], key=lambda t: -t[1])
     return {
         "category": top_cat,
@@ -121,7 +138,29 @@ def classify_trace(email):
     }
 
 
+def classify_trace(email):
+    """Dispatch to the Gemini backend when SDOC_CLASSIFIER=gemini, else
+    return the rule-based result directly. On any Gemini failure, falls
+    back to the rule-based result (marked decided_by='rule_fallback' with
+    the error attached) rather than crashing or guessing blind.
+
+    Read fresh on every call (not cached at import time) so a runtime
+    toggle -- e.g. the Streamlit sidebar's backend selector -- takes effect
+    immediately without restarting the process."""
+    rule_trace = _classify_trace_rules(email)
+    if os.environ.get("SDOC_CLASSIFIER", "rules").strip().lower() != "gemini":
+        return rule_trace
+    try:
+        from gemini_classify import classify_trace_gemini  # lazy: avoids a circular import
+        return classify_trace_gemini(email, rule_trace)
+    except Exception as e:
+        fallback = dict(rule_trace)
+        fallback["decided_by"] = "rule_fallback"
+        fallback["llm_error"] = f"{type(e).__name__}: {e}"
+        return fallback
+
+
 def classify(email):
-    """Return (category, decided_by). decided_by is 'rule' or 'fallback'."""
+    """Return (category, decided_by)."""
     trace = classify_trace(email)
     return trace["category"], trace["decided_by"]

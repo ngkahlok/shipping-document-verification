@@ -1,0 +1,4 @@
+# Dev/test-only deps. Not needed by the deployed app -- keep out of
+# requirements.txt so Streamlit Community Cloud doesn't install these.
+-r requirements.txt
+pytest==9.1.1

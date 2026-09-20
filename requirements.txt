@@ -7,3 +7,7 @@ openpyxl==3.1.5
 streamlit==1.64.0
 plotly==7.1.0
 pandas==3.0.6
+
+# Gemini-based classifier (pipeline/gemini_classify.py, SDOC_CLASSIFIER=gemini)
+google-genai==2.24.0
+python-dotenv==1.2.3

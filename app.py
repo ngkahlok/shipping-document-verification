@@ -5,6 +5,7 @@ human review queue.
     ./.venv/bin/streamlit run app.py
 """
 import json
+import os
 import sys
 import traceback
 from collections import Counter
@@ -14,6 +15,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+from dotenv import load_dotenv
 
 HERE = Path(__file__).parent
 PIPELINE_DIR = HERE / "pipeline"
@@ -31,6 +33,19 @@ import review_store  # noqa: E402
 import scoring  # noqa: E402
 
 st.set_page_config(page_title="SDOC Pipeline", layout="wide", page_icon="📦")
+
+# Local dev: load a .env file (gitignored) into os.environ, if present --
+# does nothing if it doesn't exist, and never overrides a real shell env
+# var that's already set. On Streamlit Community Cloud there's no .env
+# file at all, so this is a no-op there and the st.secrets bridge below
+# (the platform's actual secrets mechanism) is what applies instead.
+load_dotenv(HERE / ".env")
+try:
+    for _key in ("GEMINI_API_KEY", "SDOC_CLASSIFIER", "GEMINI_MODEL"):
+        if _key in st.secrets and _key not in os.environ:
+            os.environ[_key] = str(st.secrets[_key])
+except Exception:
+    pass  # no secrets.toml locally either -- fine, .env/shell env already handled above
 
 STATUS_COLOR = {"OK": "#2e7d32", "MISMATCH": "#c62828", "NEEDS_REVIEW": "#f9a825",
                 "PROCESSING_ERROR": "#6d4c41"}
@@ -87,9 +102,16 @@ def process_email(email, inbox):
 
 
 @st.cache_data(show_spinner="Running the pipeline over the inbox...")
-def run_pipeline(source: str):
+def run_pipeline(source: str, backend: str, model: str):
+    """backend/model are only used to key the cache correctly (classify_trace
+    reads them from os.environ itself) -- without them here, toggling the
+    sidebar's classifier backend would silently keep serving stale rows."""
     inbox = get_inbox(source)
-    return [process_email(email, inbox) for email in inbox]
+    emails = list(inbox)
+    if backend == "gemini" and os.environ.get("GEMINI_API_KEY"):
+        import gemini_classify
+        gemini_classify.warm_cache(emails)  # concurrent pre-warm; the loop below then mostly hits cache
+    return [process_email(email, inbox) for email in emails]
 
 
 @st.cache_data(show_spinner=False)
@@ -151,8 +173,18 @@ apply_overrides = st.sidebar.checkbox(
     "Apply human corrections to report", value=True,
     help="When on, the dashboard/score reflect human-reviewed results, not just the raw pipeline guess.")
 
+backend = st.sidebar.selectbox(
+    "Classifier backend", ["rules", "gemini"],
+    index=["rules", "gemini"].index(os.environ.get("SDOC_CLASSIFIER", "rules")),
+    key="classifier_backend",
+    help="gemini requires GEMINI_API_KEY; falls back to the rule-based result on any API failure.")
+os.environ["SDOC_CLASSIFIER"] = backend
+model = os.environ.get("GEMINI_MODEL", "gemini-flash-latest")
+if backend == "gemini" and not os.environ.get("GEMINI_API_KEY"):
+    st.sidebar.warning("GEMINI_API_KEY not set — every email will fall back to the rule-based result.")
+
 inbox = get_inbox(bundle_path)
-rows = run_pipeline(bundle_path)
+rows = run_pipeline(bundle_path, backend, model)
 gt = load_ground_truth(gt_path) if use_gt else None
 by_id = {r["email_id"]: r for r in rows}
 overrides = review_store.load_overrides()
@@ -388,6 +420,10 @@ def inspector():
             st.dataframe(pd.DataFrame(ct["matched_signals"]), width="stretch", height=140)
         elif ct.get("reason"):
             st.caption(ct["reason"])
+        if ct.get("reasoning"):
+            st.caption(f"Gemini reasoning: {ct['reasoning']}")
+    if ct.get("decided_by") == "rule_fallback" and ct.get("llm_error"):
+        st.warning(f"Gemini call failed, fell back to the rule-based result: {ct['llm_error']}")
     if g:
         ok = g["category"] == ct["category"]
         st.markdown("✅ matches ground truth" if ok else f"❌ ground truth: **{g['category']}**")
