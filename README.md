@@ -1,4 +1,4 @@
-# Shipping Document Verification (SDOC)
+# Team LegacyOS - Shipping Document Verification
 
 An automated pipeline that reads a shipping-logistics inbox, classifies each email, and cross-checks Shipping Instructions (SI) against draft Bills of Lading (BL) to catch discrepancies before documents go out.
 
