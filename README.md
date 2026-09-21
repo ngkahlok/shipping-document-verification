@@ -75,7 +75,7 @@ report" switch):
   extracted `(label, value)` pairs per attachment, and a ground-truth
   comparison badge.
   ![Email Inspector](Email_inspection.png)
-- **🧑‍⚖️ Review Queue** — see [Human review loop](#human-review-loop).
+- **🧑‍⚖️ Review Queue** 
 ![Review Queue](Review_queue.png)
 
 ## Technical architecture
