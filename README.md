@@ -97,20 +97,6 @@ Every module also exposes a `*_trace` variant (`classify_trace`,
 which signal/regex matched, which check fired, the per-field diff table —
 used by the Streamlit inspector below.
 
-## How classification works (rules + Gemini, combined)
-
-There's no "pick one of two classifiers" toggle. The rule scorer and Gemini
-work together on every email:
-
-1. The keyword-signal scorer runs first — locally, free, instantly.
-2. If `GEMINI_API_KEY` is configured, its guess, per-category scores and top
-   matched phrases are embedded in the Gemini prompt as a labeled
-   "heuristic hint" (explicitly flagged as possibly wrong and overfit to one
-   dataset's phrasing — Gemini is told to override it when the email's
-   actual content disagrees).
-3. Gemini returns a 0–100 score per category, a category pick, and a
-   one-sentence `reasoning`, and that's the final answer.
-
 **Caching**: every Gemini result is cached to
 `pipeline/.cache/gemini_classify/<hash>.json` (gitignored), one file per
 email, keyed by the email's content plus the prompt/model version — so
@@ -118,7 +104,6 @@ re-running the pipeline never re-calls the API for an email it's already
 classified, and editing the prompt automatically invalidates just the
 affected entries. Confidence is recomputed on every read (not cached), so
 tuning the confidence margin doesn't require busting the cache.
-
 
 ### Configuration (env vars)
 
