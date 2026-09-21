@@ -116,12 +116,37 @@ def run_pipeline(source: str, gemini_on: bool, model: str):
     return [process_email(email, inbox) for email in emails]
 
 
+def _ground_truth_secret():
+    """Ground truth as a private Streamlit Cloud secret (Secrets panel,
+    never in the git repo) -- lets the deployed app score against it
+    without ever committing the answer key. Paste the raw ground_truth.json
+    content as a TOML literal triple-quoted string:
+        GROUND_TRUTH_JSON = '''
+        { ... }
+        '''
+    """
+    try:
+        raw = st.secrets.get("GROUND_TRUTH_JSON")
+    except Exception:
+        return None
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+
+
+def ground_truth_available(path: str):
+    return Path(path).exists() or _ground_truth_secret() is not None
+
+
 @st.cache_data(show_spinner=False)
 def load_ground_truth(path: str):
     p = Path(path)
-    if not p.exists():
-        return None
-    return json.loads(p.read_text())
+    if p.exists():
+        return json.loads(p.read_text())
+    return _ground_truth_secret()
 
 
 def needs_human_eyes(r):
@@ -173,7 +198,7 @@ st.sidebar.title("📦 SDOC Pipeline")
 page = st.sidebar.radio("View", ["📊 Dashboard", "🔍 Email Inspector", "🧑‍⚖️ Review Queue"])
 
 bundle_path = st.sidebar.text_input("Inbox source", str(DEFAULT_BUNDLE))
-use_gt = st.sidebar.checkbox("Score against ground truth", value=DEFAULT_GT.exists())
+use_gt = st.sidebar.checkbox("Score against ground truth", value=ground_truth_available(str(DEFAULT_GT)))
 gt_path = st.sidebar.text_input("Ground truth path", str(DEFAULT_GT), disabled=not use_gt)
 apply_overrides = st.sidebar.checkbox(
     "Apply human corrections to report", value=True,
