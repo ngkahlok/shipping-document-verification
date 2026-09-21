@@ -14,11 +14,17 @@ ambiguous email -- one where no signal fires, or two categories score
 within a hair of each other -- can be routed to a human instead of forcing
 a guess. See classify_trace()'s `confidence` field.
 
-classify_trace() is a dispatcher: by default it returns this rule-based
-result directly (_classify_trace_rules), but set SDOC_CLASSIFIER=gemini to
-route through pipeline/gemini_classify.py instead, which uses this rule
-scorer's output as a hint in its prompt and as the fallback if the API
-call fails for any reason.
+classify_trace() combines both: whenever GEMINI_API_KEY is configured, this
+rule scorer's output is embedded as a hint in the prompt sent to
+pipeline/gemini_classify.py, and Gemini's judgment (informed by that hint)
+is the final answer. There's no separate "rules-only" mode to choose --
+Gemini is simply always attempted when a key is present. On an ordinary
+Gemini failure (rate limit, network error), the email is queued for
+automatic retry (see gemini_classify.py's pending store) and this rule
+result is used as a provisional value in the meantime, marked
+decided_by="gemini_pending" rather than settled permanently. Set
+SDOC_CLASSIFIER=rules to force pure-rules with no Gemini attempt at all
+(an escape hatch for tests/offline use, not exposed as a UI choice).
 """
 import os
 import re
@@ -138,17 +144,29 @@ def _classify_trace_rules(email):
     }
 
 
-def classify_trace(email):
-    """Dispatch to the Gemini backend when SDOC_CLASSIFIER=gemini, else
-    return the rule-based result directly. On any Gemini failure, falls
-    back to the rule-based result (marked decided_by='rule_fallback' with
-    the error attached) rather than crashing or guessing blind.
+def gemini_enabled():
+    """Single source of truth for "is Gemini in play right now" -- app.py
+    and pipeline/run.py both call this rather than re-deriving the same
+    condition, so they can't drift out of sync with each other."""
+    if os.environ.get("SDOC_CLASSIFIER", "").strip().lower() == "rules":
+        return False  # explicit escape hatch (tests/offline), not a UI-exposed choice
+    return bool(os.environ.get("GEMINI_API_KEY"))
 
-    Read fresh on every call (not cached at import time) so a runtime
-    toggle -- e.g. the Streamlit sidebar's backend selector -- takes effect
-    immediately without restarting the process."""
+
+def classify_trace(email):
+    """Rules alone if Gemini isn't configured; otherwise Gemini, informed
+    by the rule scorer's output as a prompt hint. classify_trace_gemini()
+    never raises for an ordinary API failure -- it queues the email for
+    automatic retry and returns this rule result as a provisional value
+    (decided_by="gemini_pending") instead. The except below is a last-resort
+    safety net for a genuinely unexpected failure (e.g. a bug in
+    gemini_classify.py itself), which should be rare.
+
+    gemini_enabled() is read fresh on every call (not cached at import
+    time) so flipping GEMINI_API_KEY takes effect immediately without
+    restarting the process."""
     rule_trace = _classify_trace_rules(email)
-    if os.environ.get("SDOC_CLASSIFIER", "rules").strip().lower() != "gemini":
+    if not gemini_enabled():
         return rule_trace
     try:
         from gemini_classify import classify_trace_gemini  # lazy: avoids a circular import

@@ -17,7 +17,8 @@ sys.path.insert(0, str(HERE))
 
 load_dotenv(HERE.parent / ".env")  # gitignored; fills GEMINI_API_KEY etc. if present, never overrides a real env var
 
-from classify import classify
+import classify
+from classify import classify as classify_email
 from compare import compare_email
 
 
@@ -30,33 +31,35 @@ def _load_inbox(source):
     return loader.Inbox(source)
 
 
+def classify_and_compare(email, inbox):
+    """One email's full submission entry -- shared by build_submission's
+    main loop and pipeline/tools/reconcile_pending.py, which recomputes
+    this for whatever comes back resolved after a retry."""
+    category, decided_by = classify_email(email)
+    if category == "BL_COMPARISON":
+        result = compare_email(email, inbox)
+    else:
+        result = {"status": "OK", "has_defect": False,
+                  "defect_fields": [], "review_reason": None}
+    return {
+        "category": category,
+        "status": result["status"],
+        "review_reason": result["review_reason"],
+        "has_defect": result["has_defect"],
+        "defect_fields": result["defect_fields"],
+        "decided_by": decided_by,
+    }
+
+
 def build_submission(source):
     inbox = _load_inbox(source)
     emails = list(inbox)
 
-    import os
-    if os.environ.get("SDOC_CLASSIFIER", "rules").strip().lower() == "gemini" and os.environ.get("GEMINI_API_KEY"):
+    if classify.gemini_enabled():
         import gemini_classify
         gemini_classify.warm_cache(emails)  # concurrent pre-warm so the loop below mostly hits cache
 
-    submission = {}
-    for email in emails:
-        eid = email["email_id"]
-        category, decided_by = classify(email)
-        if category == "BL_COMPARISON":
-            result = compare_email(email, inbox)
-        else:
-            result = {"status": "OK", "has_defect": False,
-                      "defect_fields": [], "review_reason": None}
-        submission[eid] = {
-            "category": category,
-            "status": result["status"],
-            "review_reason": result["review_reason"],
-            "has_defect": result["has_defect"],
-            "defect_fields": result["defect_fields"],
-            "decided_by": decided_by,
-        }
-    return submission
+    return {email["email_id"]: classify_and_compare(email, inbox) for email in emails}
 
 
 def main():

@@ -7,25 +7,36 @@ before documents go out. Built for the SDOC hackathon dataset in
 `sdoc-hackathon-bundle/` (participant data) and `sdoc-hackathon-docker/`
 (organizer data + scoring server).
 
-Current score against the full 520-email set with the default **rule-based**
-classifier: **1.0000** (perfect on every axis — see [Scoring](#scoring)). An
-optional **Gemini-backed** classifier is also available (see
-[Classifier backends](#classifier-backends)) — it trades a little of that
-synthetic-benchmark score for a classifier that should generalize better to
-phrasing this dataset's generator never produced.
+Scores against the full 520-email set (see [Scoring](#scoring)):
+
+| | Final score | Stage-1 macro-F1 | End-to-end |
+|---|---|---|---|
+| Rules only (no API key) | **1.0000** | 1.000 | 1.000 |
+| Rules + Gemini (combined) | **0.9935** | 0.978 | 1.000 |
+
+The rule-only 1.0000 is partly a mirage — those patterns are tuned to this
+generator's phrasing. Gemini's 9 "misses" are mostly a quirk of the
+synthetic data rather than bad judgment: the generator pairs subjects and
+bodies at random, so 8 of them are emails labeled `GENERAL` whose body
+literally reads *"Please submit SI & AED for all pending shipments"* —
+Gemini calls that `SI_REQUEST`, which is arguably the better read of the
+text in front of it. Only one (`email_504`) is a genuine misread with
+downstream impact. Defect detection is unaffected either way: 46/46
+end-to-end on both.
 
 ## Contents
 
 ```
 pipeline/
-  classify.py            Stage 1 dispatcher: rule-based scorer, or Gemini (see below)
-  gemini_classify.py      Gemini client, prompt/schema, disk cache, retry/backoff
+  classify.py            Stage 1: rule-based scorer + dispatch into Gemini (see below)
+  gemini_classify.py      Gemini client, prompt/schema, disk cache, retry queue
   extract.py              Stage 2: per-format attachment -> (label, value) pairs
   fields.py / normalize.py   label-synonym vocabulary + cross-format value normalization
   compare.py              Stages 2b/3: reliability gate + SI-vs-BL field diff
   review_store.py         JSON-backed human-review overrides
   run.py                  CLI: builds a submission.json from a bundle
-  tools/smoke_test_gemini.py   cheap ~15-call sanity check before a full Gemini run
+  tools/smoke_test_gemini.py     cheap ~15-call sanity check before a full Gemini run
+  tools/reconcile_pending.py     retries queued emails, updates a submission.json in place
 app.py                    Streamlit dashboard + inspector + human review queue
 tests/test_app.py          headless Streamlit checks (streamlit.testing.v1.AppTest)
 sdoc-hackathon-bundle/     participant data: inbox/, attachments/, loader.py (no labels)
@@ -55,11 +66,12 @@ Port`), and attachments come in four formats (`.txt`, `.pdf`, `.docx`,
 
 Four stages, in `pipeline/`:
 
-- **`classify.py`** — Stage 1, and a thin dispatcher (see
-  [Classifier backends](#classifier-backends)). Its default path is a
-  weighted keyword-signal scorer: not a literal template matcher, but a set
-  of *concept* phrases per category (what a request like this actually
-  says), so it has a chance of transferring to phrasing it's never seen —
+- **`classify.py`** — Stage 1 (see
+  [How classification works](#how-classification-works-rules--gemini-combined)).
+  Its local path is a weighted keyword-signal scorer: not a literal
+  template matcher, but a set of *concept* phrases per category (what a
+  request like this actually says), so it has a chance of transferring to
+  phrasing it's never seen —
   with a `confidence` (`high`/`low`, from the margin between the top two
   categories' scores) exposed alongside the winning label, so a genuinely
   ambiguous email can be routed to a human instead of forcing a guess.
@@ -95,26 +107,39 @@ Every module also exposes a `*_trace` variant (`classify_trace`,
 which signal/regex matched, which check fired, the per-field diff table —
 used by the Streamlit inspector below.
 
-## Classifier backends
+## How classification works (rules + Gemini, combined)
 
-`pipeline/classify.py`'s `classify_trace()` is a dispatcher controlled by
-the `SDOC_CLASSIFIER` env var:
+There's no "pick one of two classifiers" toggle. The rule scorer and Gemini
+work together on every email:
 
-- **`rules`** (default) — the keyword-signal scorer described above. No API
-  key, no network calls, no cost. Also always runs regardless of backend,
-  since its output feeds into the Gemini prompt as a hint and is the
-  fallback on any Gemini failure.
-- **`gemini`** — routes through `pipeline/gemini_classify.py`, which calls
-  the Gemini API with the email content *and* the rule scorer's guess/scores
-  embedded in the prompt as a labeled "heuristic hint" (explicitly flagged
-  as possibly wrong, not ground truth). Returns a 0–100 score per category,
-  a category pick, and a one-sentence `reasoning` string.
+1. The keyword-signal scorer runs first — locally, free, instantly.
+2. If `GEMINI_API_KEY` is configured, its guess, per-category scores and top
+   matched phrases are embedded in the Gemini prompt as a labeled
+   "heuristic hint" (explicitly flagged as possibly wrong and overfit to one
+   dataset's phrasing — Gemini is told to override it when the email's
+   actual content disagrees).
+3. Gemini returns a 0–100 score per category, a category pick, and a
+   one-sentence `reasoning`, and that's the final answer.
 
-**On any Gemini failure** (missing key, network error, rate limit, malformed
-response after retries) — it falls back to the rule-based result, marked
-`decided_by: "rule_fallback"` with the error attached in `llm_error`, rather
-than crashing or guessing blind. This has been verified against a *real*
-failure, not just a simulated one — see the quota note below.
+If no key is configured, it's automatically rules-only (nothing to combine
+with). `SDOC_CLASSIFIER=rules` forces pure-rules even when a key *is*
+present — an escape hatch for tests/offline work, not a UI-exposed choice.
+
+**On an ordinary Gemini failure** (network error, rate limit, malformed
+response after retries) the email is **queued for automatic retry** rather
+than permanently settling for the rule-based answer. It gets
+`decided_by: "gemini_pending"` with the error in `llm_error`, the
+rule-based guess is used as a provisional value so every email always has
+*some* answer, and it's recorded in `pipeline/.cache/gemini_pending.json`.
+The next time the pipeline runs — a CLI invocation, or any interaction in
+the Streamlit app — pending items are retried automatically. Nothing needs
+clicking. (`decided_by: "rule_fallback"` still exists but now means only
+"an unexpected code-level failure", which should be rare.)
+
+A `SDOC_GEMINI_POLL_INTERVAL` throttle (default 60s) means one failing
+email costs at most one attempt per interval no matter how many code paths
+ask about it — so a burst of page navigations during an outage can't
+hammer a scarce quota.
 
 **Caching**: every Gemini result is cached to
 `pipeline/.cache/gemini_classify/<hash>.json` (gitignored), one file per
@@ -127,8 +152,17 @@ tuning the confidence margin doesn't require busting the cache.
 **Concurrency**: `gemini_classify.warm_cache(emails)` pre-fills the cache
 for a batch using a small thread pool (`SDOC_GEMINI_MAX_WORKERS`, default 6)
 before the normal one-email-at-a-time loop runs — both `app.py` and
-`pipeline/run.py` call this automatically when the backend is `gemini` and
-a key is present.
+`pipeline/run.py` call this automatically whenever Gemini is enabled.
+
+**Reconciling a CLI run**: if Gemini was down/exhausted during
+`pipeline/run.py`, that run still wrote a complete `submission.json` using
+provisional values. Once Gemini is back:
+
+```bash
+./.venv/bin/python3 pipeline/tools/reconcile_pending.py sdoc-hackathon-bundle submission.json
+```
+
+retries just the queued emails and rewrites their entries in place.
 
 **A real lesson learned**: Google's free tier for the Flash-tier model is a
 **daily** quota (as of testing, 20 requests/day for this project/model, via
@@ -146,59 +180,54 @@ Streamlit app specifically (see [Streamlit app](#streamlit-app)).
 
 | Var | Default | Meaning |
 |---|---|---|
-| `SDOC_CLASSIFIER` | `rules` | `rules` or `gemini` |
-| `GEMINI_API_KEY` | — | required to actually call the API |
+| `GEMINI_API_KEY` | — | set it and Gemini is used; leave it unset for rules-only |
+| `SDOC_CLASSIFIER` | — | set to `rules` to force pure-rules even with a key present (tests/offline) |
 | `GEMINI_MODEL` | `gemini-flash-latest` | Google's rolling fast/cheap alias; set a dated model to pin one |
 | `SDOC_GEMINI_MAX_WORKERS` | `6` | thread pool size for `warm_cache` |
-| `SDOC_GEMINI_MAX_RETRIES` | `4` | retries on transient errors (429/5xx) before falling back |
+| `SDOC_GEMINI_MAX_RETRIES` | `4` | retries on transient errors (429/5xx) before queueing for later |
 | `SDOC_GEMINI_CONFIDENT_MARGIN` | `20` | Gemini's 0–100 score scale needs its own high/low threshold (the rule scorer uses a much smaller one) |
+| `SDOC_GEMINI_POLL_INTERVAL` | `60` | seconds before a queued email is retried again |
 | `SDOC_GEMINI_CACHE_DIR` | `pipeline/.cache/gemini_classify/` | override for tests/CI |
 
-### Sanity-check before a full run
+## Setup (new users start here)
 
-```bash
-export GEMINI_API_KEY=...
-./.venv/bin/python3 pipeline/tools/smoke_test_gemini.py
-```
+Requires Python 3.9+. Everything runs inside a project-local virtualenv so
+nothing pollutes your system Python.
 
-~15 calls (3 per category, against ground truth), prints
-`email_id | gold | predicted | confidence | decided_by | llm_error` per row
-— cheap feedback before spending a full 520-email budget.
+1. **Clone/open the project, then create the virtualenv:**
 
-## Running the pipeline
+   ```bash
+   cd shipping-document-verification
+   python3 -m venv .venv
+   ```
 
-```bash
-./.venv/bin/python3 pipeline/run.py sdoc-hackathon-bundle submission.json
-```
+2. **Install dependencies** from `requirements.txt`:
 
-Reads only the participant bundle (no ground truth involved) and writes a
-`submission.json` shaped like `sdoc-hackathon-bundle/sample_submission.json`.
-Set `SDOC_CLASSIFIER=gemini` to use the Gemini backend for this run.
+   ```bash
+   ./.venv/bin/pip install -r requirements.txt
+   ```
 
-## Scoring
+3. **Set up the Gemini backend** — copy `.env.example` to `.env`
+   and fill in `GEMINI_API_KEY` (see
+   [How classification works](#how-classification-works-rules--gemini-combined)
+   for the full config; `.env` is gitignored and auto-loaded by both the CLI
+   and the app). For the Streamlit app specifically, `.streamlit/secrets.toml`
+   works the same way and is what you'd use once deployed to Streamlit
+   Community Cloud (see `.streamlit/secrets.toml.example`).
 
-Ground truth lives in `sdoc-hackathon-docker/data_v2/ground_truth.json` —
-**organizer-only, gitignored, and not tracked in this repo** (it's the
-answer key; see that folder's own README for why it must never be handed to
-participants). You'll need your own copy locally (e.g. from the original
-dataset zip) for the commands below to work. Score any submission against
-it, no Docker required:
+4. **Activate venv:**
+  ```bash
+   source .venv/bin/activate
+   ```
 
-```bash
-cd sdoc-hackathon-docker/server
-python3 score_cli.py /path/to/submission.json
-```
+5. **Launch the Streamlit app:**
 
-Final score = 30% Stage-1 macro-F1 + 20% Stage-3 defect-F1 + 50% end-to-end
-(defects caught all the way through, exact field match). `NEEDS_REVIEW`
-handling is scored separately as an escalation-precision/recall
-"reliability" axis.
+   ```bash
+   streamlit run app.py
+   ```
 
-If you have Docker installed, `sdoc-hackathon-docker/docker-compose.yml`
-also stands up an HTTP server (`docker compose up --build`, serves on
-`localhost:8080`) exposing `POST /submit` for remote scoring — useful for
-simulating the real participant flow, where ground truth never leaves the
-server. See `sdoc-hackathon-docker/README.md`.
+   Opens at `http://localhost:8501` — see [Streamlit app](#streamlit-app)
+   above for what's on each page.
 
 ## Streamlit app
 
@@ -207,7 +236,7 @@ server. See `sdoc-hackathon-docker/README.md`.
 ```
 
 Three pages, selectable in the sidebar (which also holds the inbox/ground-truth
-paths, a **classifier backend** toggle, and an "apply human corrections to
+paths, a read-only Gemini status line, and an "apply human corrections to
 report" switch):
 
 - **📊 Dashboard** — final score and per-stage metrics as KPI cards (scored
@@ -230,11 +259,15 @@ report" switch):
 
 Anything the pipeline escalated (`NEEDS_REVIEW`), choked on
 (`PROCESSING_ERROR` — an unexpected exception is caught and surfaced
-visibly rather than crashing the run), or wasn't confident about even
-though it resolved (`confidence: "low"`) shows up in the **Review Queue**
-page with its full evidence (extracted fields, trace steps, Gemini's
-reasoning if applicable). Three actions, each persisted to
-`review_overrides.json` (gitignored) via `pipeline/review_store.py`:
+visibly rather than crashing the run), wasn't confident about even though
+it resolved (`confidence: "low"`), or is waiting on a Gemini retry
+(`gemini_pending`, shown as "awaiting Gemini retry") lands in the **Review
+Queue** page with its full evidence (extracted fields, trace steps,
+Gemini's reasoning if applicable). Queued-for-retry items will resolve
+themselves without anyone touching them — they appear here so the state is
+visible, and so you *can* settle one early if you don't want to wait.
+Three actions, each persisted to `review_overrides.json` (gitignored) via
+`pipeline/review_store.py`:
 
 - **Confirm** — accept the pipeline's own result as-is.
 - **Correct** — pick the right category/status/fields yourself.
@@ -244,76 +277,3 @@ reasoning if applicable). Three actions, each persisted to
 Whatever's decided there overrides the pipeline's raw output in **the
 report** — the Dashboard's score and tables reflect human-reviewed results
 by default (toggleable in the sidebar), with an "undo" per reviewed item.
-
-## Testing
-
-```bash
-./.venv/bin/pip install -r requirements-dev.txt   # adds pytest
-./.venv/bin/pytest tests/test_app.py -v
-```
-
-Headless Streamlit checks via `streamlit.testing.v1.AppTest`: the app loads
-with no exceptions and defaults to the `rules` backend, and — without
-needing any API key — switching to `gemini` with no key set degrades
-visibly (a sidebar warning, a fallback banner in the Inspector) rather than
-hanging or crashing. A third test (needs a real `GEMINI_API_KEY`) is
-skipped automatically when the key isn't set.
-
-## Setup (new users start here)
-
-Requires Python 3.9+. Everything runs inside a project-local virtualenv so
-nothing pollutes your system Python.
-
-1. **Clone/open the project, then create the virtualenv:**
-
-   ```bash
-   cd shipping-document-verification
-   python3 -m venv .venv
-   ```
-
-2. **Install dependencies** from `requirements.txt`:
-
-   ```bash
-   ./.venv/bin/pip install -r requirements.txt
-   ```
-
-3. **Verify it works** by running the pipeline over the sample inbox:
-
-   ```bash
-   ./.venv/bin/python3 pipeline/run.py sdoc-hackathon-bundle submission.json
-   ```
-
-   You should see `wrote 520 predictions to submission.json`.
-
-4. **(Optional) Score it** against the organizer's ground truth — no Docker
-   needed, just the standard library:
-
-   ```bash
-   cd sdoc-hackathon-docker/server
-   python3 score_cli.py ../../submission.json
-   cd ../..
-   ```
-
-5. **(Optional) Set up the Gemini backend** — copy `.env.example` to `.env`
-   and fill in `GEMINI_API_KEY` (see [Classifier backends](#classifier-backends)
-   for the full config; `.env` is gitignored and auto-loaded by both the CLI
-   and the app). For the Streamlit app specifically, `.streamlit/secrets.toml`
-   works the same way and is what you'd use once deployed to Streamlit
-   Community Cloud (see `.streamlit/secrets.toml.example`).
-
-6. **Launch the Streamlit app:**
-
-   ```bash
-   ./.venv/bin/streamlit run app.py
-   ```
-
-   Opens at `http://localhost:8501` — see [Streamlit app](#streamlit-app)
-   above for what's on each page.
-
-Everything after step 2 assumes the venv's Python (`./.venv/bin/python3` /
-`./.venv/bin/streamlit`), not whatever `python3` resolves to on your `PATH`.
-
-`score_cli.py` and the Docker server (step 4's alternative, see
-[Scoring](#scoring)) only need the standard library / `fastapi`+`uvicorn`
-respectively — their own `requirements.txt` lives in
-`sdoc-hackathon-docker/server/`.

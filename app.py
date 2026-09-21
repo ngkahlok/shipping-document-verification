@@ -26,6 +26,7 @@ SCORING_PATH = HERE / "sdoc-hackathon-docker" / "server"
 sys.path.insert(0, str(PIPELINE_DIR))
 sys.path.insert(0, str(SCORING_PATH))
 
+import classify  # noqa: E402
 from classify import classify_trace  # noqa: E402
 from compare import compare_email_trace  # noqa: E402
 from fields import COMPARE_FIELDS  # noqa: E402
@@ -102,13 +103,14 @@ def process_email(email, inbox):
 
 
 @st.cache_data(show_spinner="Running the pipeline over the inbox...")
-def run_pipeline(source: str, backend: str, model: str):
-    """backend/model are only used to key the cache correctly (classify_trace
-    reads them from os.environ itself) -- without them here, toggling the
-    sidebar's classifier backend would silently keep serving stale rows."""
+def run_pipeline(source: str, gemini_on: bool, model: str):
+    """gemini_on/model are only used to key the cache correctly
+    (classify_trace reads the real state from os.environ itself) --
+    without them here, flipping GEMINI_API_KEY between runs would silently
+    keep serving stale rows."""
     inbox = get_inbox(source)
     emails = list(inbox)
-    if backend == "gemini" and os.environ.get("GEMINI_API_KEY"):
+    if gemini_on:
         import gemini_classify
         gemini_classify.warm_cache(emails)  # concurrent pre-warm; the loop below then mostly hits cache
     return [process_email(email, inbox) for email in emails]
@@ -124,9 +126,13 @@ def load_ground_truth(path: str):
 
 def needs_human_eyes(r):
     """A case worth a human's attention: the pipeline escalated it, choked
-    on it, or wasn't confident about the category even though it resolved."""
+    on it, wasn't confident about the category even though it resolved, or
+    is sitting on a provisional rule-based guess while Gemini gets retried
+    automatically (a human can still confirm/correct it early if they don't
+    want to wait)."""
     return (r["status"] in ("NEEDS_REVIEW", "PROCESSING_ERROR")
-            or r["classify_trace"].get("confidence") == "low")
+            or r["classify_trace"].get("confidence") == "low"
+            or r["classify_trace"].get("decided_by") == "gemini_pending")
 
 
 def effective_row(r, overrides):
@@ -173,18 +179,36 @@ apply_overrides = st.sidebar.checkbox(
     "Apply human corrections to report", value=True,
     help="When on, the dashboard/score reflect human-reviewed results, not just the raw pipeline guess.")
 
-backend = st.sidebar.selectbox(
-    "Classifier backend", ["rules", "gemini"],
-    index=["rules", "gemini"].index(os.environ.get("SDOC_CLASSIFIER", "rules")),
-    key="classifier_backend",
-    help="gemini requires GEMINI_API_KEY; falls back to the rule-based result on any API failure.")
-os.environ["SDOC_CLASSIFIER"] = backend
+gemini_on = classify.gemini_enabled()
 model = os.environ.get("GEMINI_MODEL", "gemini-flash-latest")
-if backend == "gemini" and not os.environ.get("GEMINI_API_KEY"):
-    st.sidebar.warning("GEMINI_API_KEY not set — every email will fall back to the rule-based result.")
+if gemini_on:
+    st.sidebar.caption(f"🟢 Gemini: configured ({model}) — combined with the rule scorer's hint")
+elif os.environ.get("SDOC_CLASSIFIER", "").strip().lower() == "rules":
+    st.sidebar.caption("⚪ Gemini: disabled (SDOC_CLASSIFIER=rules)")
+else:
+    st.sidebar.caption("⚪ Gemini: not configured (rules only) — set GEMINI_API_KEY to enable")
 
 inbox = get_inbox(bundle_path)
-rows = run_pipeline(bundle_path, backend, model)
+rows = run_pipeline(bundle_path, gemini_on, model)
+
+# Runs on every script execution (not cached), so this is what makes
+# "retry once Gemini's reachable again" happen automatically on the next
+# interaction/refresh -- not a button, not a background poller. Cheap in
+# steady state: list_pending(due_only=True) is one small local file read,
+# and only actually-due items get a single fast (max_retries=1) attempt,
+# never the full backoff chain, so this can't block a page interaction for
+# long even when something's still failing.
+if gemini_on:
+    import gemini_classify
+    due = gemini_classify.list_pending(due_only=True)
+    if due:
+        due_ids = {d["email_id"] for d in due}
+        poll_results = gemini_classify.warm_cache(
+            [e for e in list(inbox) if e["email_id"] in due_ids], max_retries=1)
+        if any(r["decided_by"] == "gemini" for r in poll_results):
+            run_pipeline.clear()
+            st.rerun()
+
 gt = load_ground_truth(gt_path) if use_gt else None
 by_id = {r["email_id"]: r for r in rows}
 overrides = review_store.load_overrides()
@@ -422,8 +446,11 @@ def inspector():
             st.caption(ct["reason"])
         if ct.get("reasoning"):
             st.caption(f"Gemini reasoning: {ct['reasoning']}")
-    if ct.get("decided_by") == "rule_fallback" and ct.get("llm_error"):
-        st.warning(f"Gemini call failed, fell back to the rule-based result: {ct['llm_error']}")
+    if ct.get("decided_by") == "gemini_pending":
+        st.info(f"⏳ Gemini call failed, queued for automatic retry — showing the rule-based "
+                f"guess for now: {ct.get('llm_error')}")
+    elif ct.get("decided_by") == "rule_fallback" and ct.get("llm_error"):
+        st.warning(f"Unexpected error, permanently fell back to the rule-based result: {ct['llm_error']}")
     if g:
         ok = g["category"] == ct["category"]
         st.markdown("✅ matches ground truth" if ok else f"❌ ground truth: **{g['category']}**")
@@ -600,7 +627,10 @@ def review_queue():
     if not pending:
         st.success("Nothing waiting on a human right now.")
     for r in pending:
-        reason = r["review_reason"] or ("low-confidence classification" if r["classify_trace"].get("confidence") == "low" else r["status"])
+        if r["classify_trace"].get("decided_by") == "gemini_pending":
+            reason = "awaiting Gemini retry"
+        else:
+            reason = r["review_reason"] or ("low-confidence classification" if r["classify_trace"].get("confidence") == "low" else r["status"])
         with st.expander(f"{r['email_id']} — {r['email']['subject'][:70]}  ·  {reason}"):
             if _review_form(r, key_prefix=f"pend_{r['email_id']}"):
                 st.rerun()
