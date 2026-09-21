@@ -215,11 +215,11 @@ nothing pollutes your system Python.
    works the same way and is what you'd use once deployed to Streamlit
    Community Cloud (see `.streamlit/secrets.toml.example`).
 
-4. **Activate venv:**
+4. **Activate venv**
   
-  ```bash
-  source .venv/bin/activate
-  ```
+   ```bash
+   source .venv/bin/activate
+   ```
 
 5. **Launch the Streamlit app:**
 
