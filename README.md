@@ -216,6 +216,7 @@ nothing pollutes your system Python.
    Community Cloud (see `.streamlit/secrets.toml.example`).
 
 4. **Activate venv:**
+  
   ```bash
    source .venv/bin/activate
    ```
@@ -230,11 +231,7 @@ nothing pollutes your system Python.
    above for what's on each page.
 
 ## Streamlit app
-
-```bash
-./.venv/bin/streamlit run app.py
-```
-
+![Dashboard](Dashboard.png)
 Three pages, selectable in the sidebar (which also holds the inbox/ground-truth
 paths, a read-only Gemini status line, and an "apply human corrections to
 report" switch):
