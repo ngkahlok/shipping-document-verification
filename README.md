@@ -12,16 +12,6 @@ Scores against the full 520-email set (see [Scoring](#scoring)):
 |---|---|---|---|
 | Rules + Gemini (combined) | **0.9935** | 0.978 | 1.000 |
 
-### Configuration (env vars)
-
-Set these directly in your shell, in a project-root `.env` file (gitignored,
-auto-loaded — see `.env.example`), or in `.streamlit/secrets.toml` for the
-Streamlit app specifically (see [Streamlit app](#streamlit-app)).
-
-| Var | Default | Meaning |
-|---|---|---|
-| `GEMINI_API_KEY` | — | set it and Gemini is used; leave it unset for rules-only |
-
 ## Setup (new users start here)
 
 Requires Python 3.9+. Everything runs inside a project-local virtualenv so
