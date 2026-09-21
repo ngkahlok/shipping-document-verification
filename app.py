@@ -287,14 +287,29 @@ def dashboard():
 
     if score:
         c1, c2, c3, c4, c5, c6 = st.columns(6)
-        c1.metric("Final score", f"{score['final_score']:.3f}")
-        c2.metric("Stage-1 macro-F1", f"{score['stage1']['macro_f1']:.3f}")
-        c3.metric("Stage-3 defect-F1", f"{score['stage3']['defect_f1']:.3f}")
+        c1.metric("Final score", f"{score['final_score']:.3f}",
+                  help="Weighted total: 30% Stage-1 macro-F1 + 20% Stage-3 defect-F1 + 50% end-to-end rate. "
+                       "The headline number -- everything else on this row is a diagnostic that feeds into it "
+                       "(except Escalation F1 and Pending review, which are separate reliability/ops metrics).")
+        c2.metric("Stage-1 macro-F1", f"{score['stage1']['macro_f1']:.3f}",
+                  help="Email classification (BL_COMPARISON / SI_REQUEST / INVOICE_QUERY / GENERAL / SPAM) accuracy, "
+                       "as the F1 score (harmonic mean of precision and recall) averaged equally across all 5 "
+                       "categories -- so a rare category (e.g. SPAM) counts as much as a common one, unlike plain accuracy.")
+        c3.metric("Stage-3 defect-F1", f"{score['stage3']['defect_f1']:.3f}",
+                  help="Among BL_COMPARISON emails that were actually comparable (not escalated to NEEDS_REVIEW), "
+                       "the F1 score for catching a defect at all: precision = of the mismatches we flagged, how many "
+                       "were real; recall = of the real mismatches, how many we caught.")
         c4.metric("End-to-end rate", f"{score['end_to_end']['rate']:.3f}",
-                  help=f"{score['end_to_end']['success']}/{score['end_to_end']['total']} defect emails caught")
-        c5.metric("Escalation F1", f"{score['reliability']['escalation_f1']:.3f}")
+                  help=f"{score['end_to_end']['success']}/{score['end_to_end']['total']} defect emails caught "
+                       "end to end -- the strictest metric: the email must be routed to BL_COMPARISON *and* the "
+                       "flagged defect_fields must exactly match the true ones, field-for-field.")
+        c5.metric("Escalation F1", f"{score['reliability']['escalation_f1']:.3f}",
+                  help="Reliability axis, not part of the final score. F1 for correctly escalating a case to "
+                       "NEEDS_REVIEW (unreadable doc, missing attachment, wrong doc type, missing value) instead of "
+                       "guessing OK/MISMATCH on something it couldn't actually decide.")
         c6.metric("Pending review", pending_count,
-                  help="NEEDS_REVIEW, PROCESSING_ERROR, or low-confidence classifications with no human override yet")
+                  help="NEEDS_REVIEW, PROCESSING_ERROR, low-confidence classifications, or emails still queued for "
+                       "a Gemini retry -- with no human override yet. An operational count, not a score.")
         st.caption("Report reflects human corrections." if apply_overrides
                    else "Report reflects raw pipeline output only (human corrections off).")
         st.divider()
@@ -304,9 +319,14 @@ def dashboard():
                "(see pipeline/classify.py). A low margin means the classifier isn't sure -- those cases "
                "also show up in the Review Queue.")
     cc1, cc2, cc3 = st.columns(3)
-    cc1.metric("Low-confidence emails", len(low_conf), help="confidence == 'low' (margin < 2)")
-    cc2.metric("Avg. confidence margin", f"{avg_margin:.2f}")
-    cc3.metric("High-confidence emails", len(conf_stats) - len(low_conf))
+    cc1.metric("Low-confidence emails", len(low_conf),
+               help="Classifier's top category beat the runner-up by less than the confidence margin threshold "
+                    "-- a close call, not necessarily wrong. These also appear in the Review Queue.")
+    cc2.metric("Avg. confidence margin", f"{avg_margin:.2f}",
+               help="Average gap between the winning category's score and the runner-up's, across all emails. "
+                    "Higher = the classifier is more decisively sure on average.")
+    cc3.metric("High-confidence emails", len(conf_stats) - len(low_conf),
+               help="Top category beat the runner-up by at least the confidence margin threshold.")
 
     conf_col1, conf_col2 = st.columns(2)
     with conf_col1:

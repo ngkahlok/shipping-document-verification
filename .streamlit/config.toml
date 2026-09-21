@@ -1,0 +1,6 @@
+# Non-secret Streamlit config -- committed to the repo (unlike secrets.toml).
+# Forces light theme regardless of the visitor's OS/browser dark-mode
+# preference. Viewers can still switch to dark manually via the app's
+# hamburger menu -> Settings -> Theme; this only sets the default.
+[theme]
+base = "light"

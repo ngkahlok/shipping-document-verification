@@ -11,18 +11,8 @@ Scores against the full 520-email set (see [Scoring](#scoring)):
 
 | | Final score | Stage-1 macro-F1 | End-to-end |
 |---|---|---|---|
-| Rules only (no API key) | **1.0000** | 1.000 | 1.000 |
 | Rules + Gemini (combined) | **0.9935** | 0.978 | 1.000 |
 
-The rule-only 1.0000 is partly a mirage — those patterns are tuned to this
-generator's phrasing. Gemini's 9 "misses" are mostly a quirk of the
-synthetic data rather than bad judgment: the generator pairs subjects and
-bodies at random, so 8 of them are emails labeled `GENERAL` whose body
-literally reads *"Please submit SI & AED for all pending shipments"* —
-Gemini calls that `SI_REQUEST`, which is arguably the better read of the
-text in front of it. Only one (`email_504`) is a genuine misread with
-downstream impact. Defect detection is unaffected either way: 46/46
-end-to-end on both.
 
 ## Contents
 
@@ -121,26 +111,6 @@ work together on every email:
 3. Gemini returns a 0–100 score per category, a category pick, and a
    one-sentence `reasoning`, and that's the final answer.
 
-If no key is configured, it's automatically rules-only (nothing to combine
-with). `SDOC_CLASSIFIER=rules` forces pure-rules even when a key *is*
-present — an escape hatch for tests/offline work, not a UI-exposed choice.
-
-**On an ordinary Gemini failure** (network error, rate limit, malformed
-response after retries) the email is **queued for automatic retry** rather
-than permanently settling for the rule-based answer. It gets
-`decided_by: "gemini_pending"` with the error in `llm_error`, the
-rule-based guess is used as a provisional value so every email always has
-*some* answer, and it's recorded in `pipeline/.cache/gemini_pending.json`.
-The next time the pipeline runs — a CLI invocation, or any interaction in
-the Streamlit app — pending items are retried automatically. Nothing needs
-clicking. (`decided_by: "rule_fallback"` still exists but now means only
-"an unexpected code-level failure", which should be rare.)
-
-A `SDOC_GEMINI_POLL_INTERVAL` throttle (default 60s) means one failing
-email costs at most one attempt per interval no matter how many code paths
-ask about it — so a burst of page navigations during an outage can't
-hammer a scarce quota.
-
 **Caching**: every Gemini result is cached to
 `pipeline/.cache/gemini_classify/<hash>.json` (gitignored), one file per
 email, keyed by the email's content plus the prompt/model version — so
@@ -149,28 +119,6 @@ classified, and editing the prompt automatically invalidates just the
 affected entries. Confidence is recomputed on every read (not cached), so
 tuning the confidence margin doesn't require busting the cache.
 
-**Concurrency**: `gemini_classify.warm_cache(emails)` pre-fills the cache
-for a batch using a small thread pool (`SDOC_GEMINI_MAX_WORKERS`, default 6)
-before the normal one-email-at-a-time loop runs — both `app.py` and
-`pipeline/run.py` call this automatically whenever Gemini is enabled.
-
-**Reconciling a CLI run**: if Gemini was down/exhausted during
-`pipeline/run.py`, that run still wrote a complete `submission.json` using
-provisional values. Once Gemini is back:
-
-```bash
-./.venv/bin/python3 pipeline/tools/reconcile_pending.py sdoc-hackathon-bundle submission.json
-```
-
-retries just the queued emails and rewrites their entries in place.
-
-**A real lesson learned**: Google's free tier for the Flash-tier model is a
-**daily** quota (as of testing, 20 requests/day for this project/model, via
-`generativelanguage.googleapis.com/generate_content_free_tier_requests`),
-not a per-minute rate limit — a single full 520-email run will exhaust it
-almost immediately. Enable billing on the Google AI Studio project backing
-your key for a realistic quota before running the full inbox through
-Gemini; small smoke tests are fine on the free tier.
 
 ### Configuration (env vars)
 
@@ -181,13 +129,6 @@ Streamlit app specifically (see [Streamlit app](#streamlit-app)).
 | Var | Default | Meaning |
 |---|---|---|
 | `GEMINI_API_KEY` | — | set it and Gemini is used; leave it unset for rules-only |
-| `SDOC_CLASSIFIER` | — | set to `rules` to force pure-rules even with a key present (tests/offline) |
-| `GEMINI_MODEL` | `gemini-flash-latest` | Google's rolling fast/cheap alias; set a dated model to pin one |
-| `SDOC_GEMINI_MAX_WORKERS` | `6` | thread pool size for `warm_cache` |
-| `SDOC_GEMINI_MAX_RETRIES` | `4` | retries on transient errors (429/5xx) before queueing for later |
-| `SDOC_GEMINI_CONFIDENT_MARGIN` | `20` | Gemini's 0–100 score scale needs its own high/low threshold (the rule scorer uses a much smaller one) |
-| `SDOC_GEMINI_POLL_INTERVAL` | `60` | seconds before a queued email is retried again |
-| `SDOC_GEMINI_CACHE_DIR` | `pipeline/.cache/gemini_classify/` | override for tests/CI |
 
 ## Setup (new users start here)
 
