@@ -231,7 +231,7 @@ nothing pollutes your system Python.
    above for what's on each page.
 
 ## Streamlit app
-![Dashboard](Dashboard.png)
+
 Three pages, selectable in the sidebar (which also holds the inbox/ground-truth
 paths, a read-only Gemini status line, and an "apply human corrections to
 report" switch):
@@ -243,6 +243,7 @@ report" switch):
   `SDOC_GEMINI_CONFIDENT_MARGIN`), category/status distributions, which of
   the 7 fields mismatches most often, `NEEDS_REVIEW` reason breakdown, a
   Stage-1 confusion-matrix heatmap, and a filterable table of every email.
+  ![Dashboard](Dashboard.png)
 - **🔍 Email Inspector** — pick any email and watch the pipeline reason
   through it: which classifier decided (rule signal fired, or Gemini's
   per-category scores + `reasoning`, with a visible warning if it had to
@@ -250,7 +251,9 @@ report" switch):
   reliability checks, a side-by-side SI-vs-BL field diff table, the raw
   extracted `(label, value)` pairs per attachment, and a ground-truth
   comparison badge.
+  ![Email Inspector](Email_inspection.png)
 - **🧑‍⚖️ Review Queue** — see [Human review loop](#human-review-loop).
+![Review Queue](Review_queue.png)
 
 ## Human review loop
 
