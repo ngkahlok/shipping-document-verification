@@ -218,8 +218,8 @@ nothing pollutes your system Python.
 4. **Activate venv:**
   
   ```bash
-   source .venv/bin/activate
-   ```
+  source .venv/bin/activate
+  ```
 
 5. **Launch the Streamlit app:**
 
