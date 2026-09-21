@@ -203,3 +203,114 @@ Three actions, each persisted to `review_overrides.json` (gitignored) via
 Whatever's decided there overrides the pipeline's raw output in **the
 report** — the Dashboard's score and tables reflect human-reviewed results
 by default (toggleable in the sidebar), with an "undo" per reviewed item.
+
+## Technical architecture
+
+In plain terms, the system is a straight line an email travels down, with
+one branch point:
+
+```
+Inbox email
+   │
+   ▼
+Stage 1 — Classify (rules, or Gemini if unsure)
+   │
+   ├── Not a comparison request → done, category recorded
+   │
+   └── BL_COMPARISON → Stage 2 — Extract fields from SI + BL attachments
+                            │
+                            ▼
+                        Stage 2b — Reliability check
+                        (can we trust what we extracted?)
+                            │
+                            ▼
+                        Stage 3 — Compare SI vs BL field-by-field
+                            │
+                            ▼
+                        OK / MISMATCH / NEEDS_REVIEW
+```
+
+- **Classification** decides what kind of email it is.
+- **Extraction** pulls structured data out of whatever file format the
+  attachment happens to be (text, PDF, Word, Excel).
+- **Comparison** checks whether the two documents agree.
+- **The Streamlit app** (`app.py`) sits on top of all of it as a
+  dashboard, so a person can see the results, drill into any single
+  email, and correct the pipeline when it gets something wrong.
+
+Everything in between is glue: a shared vocabulary (`fields.py`,
+`normalize.py`) so "Port of Loading" and "Load Port" are recognized as the
+same thing, a cache so repeated runs don't re-pay for Gemini calls, and a
+review store so human corrections stick.
+
+## Implementation details
+
+A few of the more interesting decisions behind the code:
+
+- **Rules first, AI second.** Every email is scored by a cheap, local
+  keyword-matching classifier first. Gemini is only called when that
+  local classifier isn't confident — which keeps the system fast and
+  cheap for the easy cases, and accurate for the ambiguous ones.
+- **PDFs are read as raw character streams, not laid-out text.** Normal
+  PDF text extraction groups words by their position on the page, but in
+  these documents some labels are long enough to visually run into the
+  answer next to them. Reading the underlying character order (instead of
+  page position) avoids that garbling.
+- **Everything is normalized before comparing.** Values are cleaned up
+  (extra address lines, port codes, weight units, formatting) so that two
+  fields which *mean* the same thing still *look* the same when compared,
+  regardless of which document or file format they came from.
+- **A reliability gate runs before any comparison.** The pipeline checks
+  for missing attachments, unreadable files, wrong document types, and
+  blank values first — so a `MISMATCH` verdict always means "the data
+  genuinely disagrees," not "we failed to read the data."
+- **Every decision is traceable.** Each stage can explain itself (which
+  rule fired, which fields didn't match, why something needs review) so
+  the Streamlit inspector can show a human exactly why the pipeline
+  concluded what it did, instead of just handing over a verdict.
+
+## Challenges faced
+
+- **The same field, said differently across documents.** The Shipping
+  Instruction and Bill of Lading don't use the same labels for the same
+  data (e.g. "Port of Loading" vs "Load Port"), so a simple text match
+  wasn't enough — the pipeline needed a synonym vocabulary and value
+  normalization to compare like with like.
+- **PDF attachments were the hardest format.** Their fixed-position
+  layout meant long labels could visually overlap the answer next to
+  them, which standard text-extraction libraries misread as jumbled text.
+  This required extracting at the character-stream level instead of
+  relying on layout-based extraction.
+- **Telling "no mismatch" apart from "couldn't read the document."** Early
+  on, a missing attachment or an extraction failure could look
+  indistinguishable from a genuine field mismatch. The reliability gate
+  (Stage 2b) was added specifically to separate "the documents disagree"
+  from "we don't have enough information to know."
+- **Balancing cost/speed against accuracy.** Calling an AI model for
+  every single email would be slow and expensive; relying only on simple
+  rules would miss ambiguous phrasing. The two-tier
+  rules-first-then-Gemini approach, with a confidence score and a local
+  cache, was the answer.
+- **Keeping humans in the loop without slowing things down.** Not every
+  decision should be fully automatic. The review queue and override
+  system let a person correct the pipeline's mistakes without needing to
+  re-run anything, while the pipeline keeps working normally for
+  everything else.
+
+## Future roadmap
+
+- **Expand beyond 7 fields** — support additional SI/BL fields as new
+  document types or customer requirements come in.
+- **Support more attachment formats** — e.g. scanned/image-based PDFs via
+  OCR, which the current extractor doesn't handle.
+- **Active learning from human corrections** — feed confirmed/corrected
+  reviews back into the classifier so accuracy improves automatically
+  over time, instead of only fixing the one email in front of you.
+- **Batch and API access** — expose the pipeline as an API endpoint or
+  batch job runner for integration into a real inbox/ops workflow, rather
+  than a manual Streamlit session.
+- **Multi-model support** — allow swapping Gemini for other LLM providers
+  as a configuration choice, rather than a hardcoded dependency.
+- **Alerting** — notify a human directly (email/Slack) when something
+  lands in the review queue, instead of requiring someone to check the
+  dashboard.
