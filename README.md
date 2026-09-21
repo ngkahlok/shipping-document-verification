@@ -1,109 +1,16 @@
 # Shipping Document Verification (SDOC)
 
-A pipeline that reads a shipping-logistics inbox, classifies each email, and
-for comparison requests, cross-checks the **Shipping Instruction (SI)**
-against the **draft Bill of Lading (BL)** attachments to catch discrepancies
-before documents go out. Built for the SDOC hackathon dataset in
-`sdoc-hackathon-bundle/` (participant data) and `sdoc-hackathon-docker/`
-(organizer data + scoring server).
+An automated pipeline that reads a shipping-logistics inbox, classifies each email, and cross-checks Shipping Instructions (SI) against draft Bills of Lading (BL) to catch discrepancies before documents go out.
+
+Classification uses a hybrid rules + Gemini approach: a weighted keyword-signal scorer runs first as a fast, always-available baseline, then Gemini (when configured) makes the final call, using the rule output as a hint it can override. Each email is sorted into one of five categories, and comparison requests are checked across seven key fields (shipper, consignee, ports, container count, gross weight), flagging matches, mismatches, or cases needing human review.
+
+Attachments in four formats (.txt, .pdf, .docx, .xlsx) are parsed and normalized so differently-labeled fields compare correctly. A Streamlit dashboard provides live scoring, a per-email inspector showing the pipeline's reasoning, and a human review queue for low-confidence or ambiguous cases.
 
 Scores against the full 520-email set (see [Scoring](#scoring)):
 
 | | Final score | Stage-1 macro-F1 | End-to-end |
 |---|---|---|---|
 | Rules + Gemini (combined) | **0.9935** | 0.978 | 1.000 |
-
-
-## Contents
-
-```
-pipeline/
-  classify.py            Stage 1: rule-based scorer + dispatch into Gemini (see below)
-  gemini_classify.py      Gemini client, prompt/schema, disk cache, retry queue
-  extract.py              Stage 2: per-format attachment -> (label, value) pairs
-  fields.py / normalize.py   label-synonym vocabulary + cross-format value normalization
-  compare.py              Stages 2b/3: reliability gate + SI-vs-BL field diff
-  review_store.py         JSON-backed human-review overrides
-  run.py                  CLI: builds a submission.json from a bundle
-  tools/smoke_test_gemini.py     cheap ~15-call sanity check before a full Gemini run
-  tools/reconcile_pending.py     retries queued emails, updates a submission.json in place
-app.py                    Streamlit dashboard + inspector + human review queue
-tests/test_app.py          headless Streamlit checks (streamlit.testing.v1.AppTest)
-sdoc-hackathon-bundle/     participant data: inbox/, attachments/, loader.py (no labels)
-sdoc-hackathon-docker/     organizer data: ground_truth.json, scoring.py, score_cli.py, Docker server
-.venv/                     project-local virtualenv
-```
-
-## The task
-
-For every email, decide:
-
-1. **category** — `BL_COMPARISON`, `SI_REQUEST`, `INVOICE_QUERY`, `GENERAL`, or `SPAM`.
-2. For `BL_COMPARISON` emails, compare the SI against the draft BL across 7
-   fields — `shipper`, `consignee`, `notify_party`, `port_of_loading`,
-   `port_of_discharge`, `container_count`, `gross_weight_kg` — and report:
-   - `status`: `OK` (all match), `MISMATCH` (≥1 field differs), or
-     `NEEDS_REVIEW` (can't decide — unreadable / missing / wrong document).
-   - `has_defect` + `defect_fields` when `MISMATCH`.
-   - `review_reason` when `NEEDS_REVIEW`
-     (`wrong_doc_type` | `missing_attachment` | `unreadable` | `missing_value`).
-
-The SI and BL label the same field differently (`Port of Loading` vs `Load
-Port`), and attachments come in four formats (`.txt`, `.pdf`, `.docx`,
-`.xlsx`) — so the extractor has to align by meaning, not by header text.
-
-## Pipeline design
-
-Four stages, in `pipeline/`:
-
-- **`classify.py`** — Stage 1 (see
-  [How classification works](#how-classification-works-rules--gemini-combined)).
-  Its local path is a weighted keyword-signal scorer: not a literal
-  template matcher, but a set of *concept* phrases per category (what a
-  request like this actually says), so it has a chance of transferring to
-  phrasing it's never seen —
-  with a `confidence` (`high`/`low`, from the margin between the top two
-  categories' scores) exposed alongside the winning label, so a genuinely
-  ambiguous email can be routed to a human instead of forcing a guess.
-- **`extract.py`** — Stage 2. Turns each attachment into `(label, value)`
-  pairs regardless of format:
-  - `.txt` — line-based, colon-split.
-  - `.docx` — table rows (`python-docx`).
-  - `.xlsx` — two-column cell rows (`openpyxl`).
-  - `.pdf` — the hard one. Long labels (e.g. `"Notify
-    Party/Intermediate Consignee"`) can visually overlap their fixed-position
-    value column in the generated PDF. `pdfplumber`'s spatial word-clustering
-    garbles that overlap into interleaved nonsense, so extraction works at
-    the **character-stream level** instead: the underlying character order
-    is always clean (every label character is emitted before the value's),
-    so a label/value split is found by walking that stream and either
-    following an explicit colon, or detecting where x-position runs
-    backwards (a new text object starting left of where the previous one
-    had already reached).
-- **`fields.py`** / **`normalize.py`** — the label-synonym vocabulary and
-  cross-format value normalization (strips port LOCODE suffixes, entity
-  address lines, weight formatting, container count/size), so the same
-  field compares equal regardless of which format or synonym rendered it.
-- **`compare.py`** — Stages 2b/3. Before diffing, a reliability gate checks
-  (in order): attachment count + intent (`missing_attachment`), extraction
-  failure (`unreadable`), how many of the 7 fields resolved at all
-  (`wrong_doc_type`), and blank/placeholder values (`missing_value`). Only
-  if none of those fire does it do the field-by-field diff and report
-  `OK`/`MISMATCH`.
-- **`run.py`** — orchestrates the above into a `submission.json`.
-
-Every module also exposes a `*_trace` variant (`classify_trace`,
-`compare_email_trace`) that returns the full reasoning behind a decision —
-which signal/regex matched, which check fired, the per-field diff table —
-used by the Streamlit inspector below.
-
-**Caching**: every Gemini result is cached to
-`pipeline/.cache/gemini_classify/<hash>.json` (gitignored), one file per
-email, keyed by the email's content plus the prompt/model version — so
-re-running the pipeline never re-calls the API for an email it's already
-classified, and editing the prompt automatically invalidates just the
-affected entries. Confidence is recomputed on every read (not cached), so
-tuning the confidence margin doesn't require busting the cache.
 
 ### Configuration (env vars)
 
@@ -180,29 +87,6 @@ report" switch):
   ![Email Inspector](Email_inspection.png)
 - **🧑‍⚖️ Review Queue** — see [Human review loop](#human-review-loop).
 ![Review Queue](Review_queue.png)
-
-## Human review loop
-
-Anything the pipeline escalated (`NEEDS_REVIEW`), choked on
-(`PROCESSING_ERROR` — an unexpected exception is caught and surfaced
-visibly rather than crashing the run), wasn't confident about even though
-it resolved (`confidence: "low"`), or is waiting on a Gemini retry
-(`gemini_pending`, shown as "awaiting Gemini retry") lands in the **Review
-Queue** page with its full evidence (extracted fields, trace steps,
-Gemini's reasoning if applicable). Queued-for-retry items will resolve
-themselves without anyone touching them — they appear here so the state is
-visible, and so you *can* settle one early if you don't want to wait.
-Three actions, each persisted to `review_overrides.json` (gitignored) via
-`pipeline/review_store.py`:
-
-- **Confirm** — accept the pipeline's own result as-is.
-- **Correct** — pick the right category/status/fields yourself.
-- **Retry** — re-run extraction/classification live (useful after a
-  transient failure); accept the new result if it looks right.
-
-Whatever's decided there overrides the pipeline's raw output in **the
-report** — the Dashboard's score and tables reflect human-reviewed results
-by default (toggleable in the sidebar), with an "undo" per reviewed item.
 
 ## Technical architecture
 
